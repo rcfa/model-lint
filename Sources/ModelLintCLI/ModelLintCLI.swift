@@ -34,10 +34,12 @@ struct ModelLintCLI: AsyncParsableCommand {
     /// Repeatable, because models genuinely live in several places at once.
     @Option(name: .long, help: ArgumentHelp(
         "Directory holding models. Repeatable. Default: ~/Library/MLModels.",
-        discussion: "The default is where Apple's conventions put on-disk model assets. Plenty of "
-            + "tools ignore that and hide models in a dot-directory instead — ~/.cache/huggingface/"
-            + "hub, ~/.lmstudio/models, ~/.<project>/models — so point this wherever yours actually "
-            + "are, or set MODEL_LINT_ROOT. Repeat it to audit several locations in one run.",
+        discussion: "Apple specifies no location for model assets, but ~/Library is where macOS "
+            + "keeps application support data (Preferences, Application Support, Caches), and large "
+            + "weights are that kind of thing — hence the default. Plenty of tools instead hide "
+            + "models in a dot-directory (~/.cache/huggingface/hub, ~/.lmstudio/models, "
+            + "~/.<project>/models), so point this wherever yours actually are, or set "
+            + "MODEL_LINT_ROOT. Repeat it to audit several locations in one run.",
         valueName: "dir"))
     var root: [String] = []
 
@@ -56,9 +58,10 @@ struct ModelLintCLI: AsyncParsableCommand {
     @Flag(name: .long, help: "Exit non-zero when any defect is found (for scripting).")
     var strict = false
 
-    /// Where Apple's conventions say on-disk model assets belong. Kept as the default because it is
-    /// the RIGHT answer, not merely one opinion — but plenty of tools hide models in a dot-directory
-    /// instead, so --root and MODEL_LINT_ROOT exist for the world as it is.
+    /// Apple defines no location for model assets. It does define what ~/Library is for — support
+    /// data an app owns but a user may still need to find — and multi-gigabyte weights fit that far
+    /// better than a hidden dot-directory does. So this default is an extrapolation, not a citation,
+    /// and --root plus MODEL_LINT_ROOT exist for the world as it is.
     static let defaultRoot = ProcessInfo.processInfo.environment["MODEL_LINT_ROOT"].flatMap {
         $0.isEmpty ? nil : $0
     } ?? NSString(string: "~/Library/MLModels").expandingTildeInPath

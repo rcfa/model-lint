@@ -21,7 +21,7 @@ public enum ModelLint {
     /// pick one silently.
     ///
     /// There is no standard location, which is the whole problem. `~/Library/MLModels` is where they
-    /// belong if you follow Apple's conventions; almost nothing follows them. The Hugging Face cache
+    /// belong if you extend macOS's ~/Library convention to them; almost nothing does. The HF cache
     /// is where most tooling actually writes, and every app that manages its own downloads invents a
     /// third place. So this returns the ones that EXIST on this machine and the caller reports which
     /// it used — guessing silently is how you audit an empty directory and conclude all is well.
@@ -37,7 +37,7 @@ public enum ModelLint {
         if let r = env["HF_HOME"], !r.isEmpty { candidates.append(r + "/hub") }
         candidates += [
             home + "/.cache/huggingface/hub",   // the de-facto default for HF tooling
-            home + "/Library/MLModels",         // where Apple's conventions put them
+            home + "/Library/MLModels",         // where the ~/Library convention would put them
             home + "/.lmstudio/models",         // LM Studio
             home + "/.ollama/models",           // Ollama
         ]

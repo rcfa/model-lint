@@ -15,10 +15,13 @@ model-lint --doctor --apply       # make them
 
 ## Where your models are
 
-`--root` defaults to **`~/Library/MLModels`**, which is where Apple's conventions say on-disk model
-assets belong: user-visible, backed up on your terms, and findable by someone who did not install
-them. The default is a gentle argument for putting them there. Plenty of tools ignore the convention
-and hide models in a dot-directory instead —
+`--root` defaults to **`~/Library/MLModels`**. Apple does not specify a location for model assets —
+no convention covers them directly. What `~/Library` *is* for is application support data:
+`~/Library/Preferences`, `~/Library/Application Support`, `~/Library/Caches`. Multi-gigabyte weights
+a user might want to find, move, or exclude from a backup are squarely that kind of thing, so
+`~/Library/MLModels` is the natural extrapolation — user-visible, and findable by someone who did not
+install them. The default is a gentle argument for putting them there. Plenty of tools instead hide
+models in a dot-directory —
 `~/.cache/huggingface/hub`, `~/.lmstudio/models`, `~/.<project>/models` — so point it at wherever
 yours actually live:
 
