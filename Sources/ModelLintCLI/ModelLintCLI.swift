@@ -31,8 +31,15 @@ struct ModelLintCLI: AsyncParsableCommand {
             Repair mode previews by default; add --apply to write.
             """)
 
-    @Option(name: .long, help: "Model root to scan (default: ~/Library/MLModels).")
-    var root: String = NSString(string: "~/Library/MLModels").expandingTildeInPath
+    /// Repeatable, because models genuinely live in several places at once.
+    @Option(name: .long, help: ArgumentHelp(
+        "Directory holding models. Repeatable. Default: ~/Library/MLModels.",
+        discussion: "The default is where Apple's conventions put on-disk model assets. Plenty of "
+            + "tools ignore that and hide models in a dot-directory instead — ~/.cache/huggingface/"
+            + "hub, ~/.lmstudio/models, ~/.<project>/models — so point this wherever yours actually "
+            + "are, or set MODEL_LINT_ROOT. Repeat it to audit several locations in one run.",
+        valueName: "dir"))
+    var root: [String] = []
 
     @Option(name: .long, help: "Only bundles whose id contains this substring.")
     var filter: String?
@@ -49,6 +56,13 @@ struct ModelLintCLI: AsyncParsableCommand {
     @Flag(name: .long, help: "Exit non-zero when any defect is found (for scripting).")
     var strict = false
 
+    /// Where Apple's conventions say on-disk model assets belong. Kept as the default because it is
+    /// the RIGHT answer, not merely one opinion — but plenty of tools hide models in a dot-directory
+    /// instead, so --root and MODEL_LINT_ROOT exist for the world as it is.
+    static let defaultRoot = ProcessInfo.processInfo.environment["MODEL_LINT_ROOT"].flatMap {
+        $0.isEmpty ? nil : $0
+    } ?? NSString(string: "~/Library/MLModels").expandingTildeInPath
+
     func validate() throws {
         guard ["text", "hf"].contains(format) else {
             throw ValidationError("--format must be 'text' or 'hf', not '\(format)'")
@@ -58,14 +72,29 @@ struct ModelLintCLI: AsyncParsableCommand {
         guard !apply || doctor else {
             throw ValidationError("--apply only means something with --doctor (it gates the writes).")
         }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir), isDir.boolValue else {
-            throw ValidationError("no such model root: \(root)")
+        for r in root.isEmpty ? [Self.defaultRoot] : root {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: r, isDirectory: &isDir), isDir.boolValue else {
+                // Name the alternatives rather than silently scanning one: an audit that reports
+                // nothing must never be confusable with an audit that scanned nothing.
+                let known = ModelLint.knownModelDirectories()
+                let hint = known.isEmpty ? ""
+                    : "\n\nModels appear to be in:\n" + known.map { "  \($0)" }.joined(separator: "\n")
+                throw ValidationError("no such model root: \(r)\nPass --root <dir> or set MODEL_LINT_ROOT.\(hint)")
+            }
         }
     }
 
     func run() async throws {
-        let reports = ModelLint.scan(root: root, filter: filter)
+        let roots = root.isEmpty ? [Self.defaultRoot] : root
+        // ALWAYS say what was scanned. An audit that reports nothing is indistinguishable from an
+        // audit that scanned nothing, and the second is far more likely when the default is a guess.
+        if format != "hf" {
+            for r in roots { print("scanning \(r)") }
+        }
+
+        var reports: [ModelLint.Report] = []
+        for r in roots { reports += ModelLint.scan(root: r, filter: filter) }
 
         if doctor {
             let outcome = ModelDoctor.repair(reports, apply: apply)

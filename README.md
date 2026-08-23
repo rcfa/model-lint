@@ -6,11 +6,32 @@ disturb a running job.
 
 ```
 model-lint                        # report everything wrong, write nothing
+model-lint --root ~/models        # audit somewhere else (repeatable)
 model-lint --filter Qwen3.8       # only bundles whose id contains this
 model-lint --format hf            # a report ready to file against the model repo
 model-lint --doctor               # preview the derivable repairs
 model-lint --doctor --apply       # make them
 ```
+
+## Where your models are
+
+`--root` defaults to **`~/Library/MLModels`**, which is where Apple's conventions say on-disk model
+assets belong: user-visible, backed up on your terms, and findable by someone who did not install
+them. The default is a gentle argument for putting them there. Plenty of tools ignore the convention
+and hide models in a dot-directory instead —
+`~/.cache/huggingface/hub`, `~/.lmstudio/models`, `~/.<project>/models` — so point it at wherever
+yours actually live:
+
+```
+model-lint --root ~/.cache/huggingface/hub
+model-lint --root ~/Library/MLModels --root ~/.lmstudio/models   # both, one run
+export MODEL_LINT_ROOT=~/models                                  # or set it once
+```
+
+The root being scanned is always printed, because an audit that reports nothing must never be
+confusable with an audit that scanned nothing. If the root doesn't exist the tool says so and names
+the model directories it can see, rather than quietly auditing an empty tree and pronouncing you
+healthy.
 
 ## What it finds
 

@@ -17,6 +17,39 @@ public enum ModelLint {
         public var fixable: [ModelBundleAudit.Finding] { findings.filter { $0.severity == .fixable } }
     }
 
+    /// Model directories that EXIST on this machine — used to make a bad --root helpful, not to
+    /// pick one silently.
+    ///
+    /// There is no standard location, which is the whole problem. `~/Library/MLModels` is where they
+    /// belong if you follow Apple's conventions; almost nothing follows them. The Hugging Face cache
+    /// is where most tooling actually writes, and every app that manages its own downloads invents a
+    /// third place. So this returns the ones that EXIST on this machine and the caller reports which
+    /// it used — guessing silently is how you audit an empty directory and conclude all is well.
+    ///
+    /// Environment overrides come first, and `HF_HOME`/`HUGGINGFACE_HUB_CACHE` are honoured because a
+    /// user who set them has already said where their models are.
+    public static func knownModelDirectories() -> [String] {
+        let env = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var candidates: [String] = []
+        if let r = env["MODEL_LINT_ROOT"], !r.isEmpty { candidates.append(r) }
+        if let r = env["HUGGINGFACE_HUB_CACHE"], !r.isEmpty { candidates.append(r) }
+        if let r = env["HF_HOME"], !r.isEmpty { candidates.append(r + "/hub") }
+        candidates += [
+            home + "/.cache/huggingface/hub",   // the de-facto default for HF tooling
+            home + "/Library/MLModels",         // where Apple's conventions put them
+            home + "/.lmstudio/models",         // LM Studio
+            home + "/.ollama/models",           // Ollama
+        ]
+        var seen = Set<String>()
+        return candidates.filter { path in
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue
+            else { return false }
+            return seen.insert(path).inserted
+        }
+    }
+
     /// Read every bundle under `root` and keep the ones with something wrong.
     ///
     /// Header-only throughout: an 8-byte length prefix then that many bytes of JSON per weight file.
