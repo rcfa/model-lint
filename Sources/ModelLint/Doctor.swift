@@ -141,6 +141,13 @@ public enum ModelDoctor {
         let shards = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
             .filter { $0.hasSuffix(".safetensors") }.sorted()
         var n = 0, notes: [String] = []
+        // A rewrite interrupted by a crash or a kill leaves its candidate behind, holding a shard's
+        // worth of disk. `rewrite` clears the one it is about to use, but only for shards it reaches.
+        for orphan in ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+            .filter({ $0.hasSuffix(".aligned-tmp") }) {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(orphan))
+            notes.append("    removed orphaned candidate \(orphan)")
+        }
         for name in shards {
             switch TensorAlignment.rewrite(shard: dir.appendingPathComponent(name)) {
             case .alreadyAligned:

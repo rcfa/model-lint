@@ -180,10 +180,18 @@ extension TensorAlignment {
             try? src.seek(toOffset: UInt64(start + step.from))
             var remaining = step.to - step.from
             while remaining > 0 {
-                guard let block = try? src.read(upToCount: min(chunk, remaining)), !block.isEmpty
-                else { return fail("short read in \(step.name)") }
-                dst.write(block)
-                remaining -= block.count
+                // An explicit pool per chunk. `FileHandle.read` hands back autoreleased backing
+                // store, and at eight megabytes a chunk a multi-shard run accumulates it faster than
+                // the enclosing pool drains — which is a SIGKILL, not a slowdown. Found only at real
+                // scale: a 253 MB shard is 32 chunks and never shows it.
+                let ok = autoreleasepool { () -> Bool in
+                    guard let block = try? src.read(upToCount: min(chunk, remaining)), !block.isEmpty
+                    else { return false }
+                    dst.write(block)
+                    remaining -= block.count
+                    return true
+                }
+                guard ok else { return fail("short read in \(step.name)") }
             }
         }
         try? dst.close()
@@ -238,9 +246,13 @@ extension TensorAlignment {
             var remaining = want.to - want.from
             while remaining > 0 {
                 let size = min(chunk, remaining)
-                guard let x = try? a.read(upToCount: size), let y = try? b.read(upToCount: size),
-                    x.count == size, x == y
-                else { return "\(want.name): bytes differ" }
+                let same = autoreleasepool { () -> Bool in
+                    guard let x = try? a.read(upToCount: size), let y = try? b.read(upToCount: size),
+                        x.count == size, x == y
+                    else { return false }
+                    return true
+                }
+                guard same else { return "\(want.name): bytes differ" }
                 remaining -= size
             }
         }
