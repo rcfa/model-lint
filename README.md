@@ -46,15 +46,25 @@ healthy.
 | `unindexedUniqueData` | A required weight file the index never mentions. |
 | `missingChatTemplate` | MC scoring still works while generation fails, so the model looks selectively broken rather than mis-packaged. |
 | `missingSamplingDefaults` | Consumers fall back to generic settings instead of the author's published ones. |
+| `misalignedTensors` | Tensor offsets don't divide by their dtype width, so MLX can't mmap them and copies them into aligned buffers at load. The values are unaffected; the memory is not. |
 
-The last two are reported only for models classified as chat LLMs. A drafter never generates
+`misalignedTensors` is worth its own note, because it is invisible everywhere else. The bytes are
+correct, the model loads, and greedy decoding is bit-identical — so nothing about the OUTPUT reveals
+it. What it costs is memory. On one 95 GB bundle with 1,775 of 2,999 tensors misaligned, that was
+59.3 GB of extra anonymous memory on a 128 GB machine: the compressor filled, the machine swapped,
+and generation fell to roughly three tokens per minute. Aligning the shards took the compressor from
+60.1 GB to 0.8 GB. Under the RAM ceiling it costs you nothing you would notice; over it, it is the
+difference between usable and not. It is also not one vendor's bug — it turned up in 49 of 128
+bundles here, across six different publishers.
+
+The chat-template and sampling-default findings are reported only for models classified as chat LLMs. A drafter never generates
 independently, a diffusion model's knobs are denoising steps, and an image model is not a language
 model — flagging those would be seven false positives out of eight.
 
 ## What `--doctor` will and won't do
 
-It repairs exactly two things, because exactly two are **derivable from the bundle** — there is one
-correct answer and it is computable from what is on disk:
+It repairs exactly three things, because exactly three are **derivable from the bundle** — there is
+one correct answer and it is computable from what is on disk:
 
 - **Delete a byte-identical duplicate sharding.** Only after proving it: name equality is not byte
   equality, and a re-conversion can produce the same tensor names with *repaired* values. Deleting
@@ -62,6 +72,12 @@ correct answer and it is computable from what is on disk:
   that file rather than aborting the run.
 - **Rebuild the index** from the weight files actually present, keeping the original as
   `model.safetensors.index.json.orig`.
+- **Realign the shards**, rewriting each with a padded header and 8-byte tensor offsets — enough for
+  every dtype, at a cost of at most 7 bytes per tensor (about 21 KB across a 95 GB model). No tensor
+  byte is altered; only its position. Each shard is written beside the original and every tensor is
+  compared against it byte for byte before the replacement is allowed, so a rewrite that cannot be
+  proven identical is thrown away and the original left untouched. Peak extra disk is one shard, not
+  a second copy of the bundle.
 
 It will **not** write a chat template or a sampling default. Not because importing them is wrong — a
 value published by the model's author beats a generic fallback — but because the source is *outside*

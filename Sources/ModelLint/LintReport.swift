@@ -104,8 +104,8 @@ public enum ModelLint {
             <!-- ─────────── \(r.id) ─────────── -->
             ### Packaging issue in `\(r.id)`
 
-            Found by an automated bundle audit (`model-lint`) that compares the safetensors index
-            against the tensor headers actually present. Reporting here because the files as
+            Found by an automated bundle audit (`model-lint`) that reads the safetensors headers and
+            checks them against the index and against MLX's load path. Reporting here because the files as
             published are affected, not just my local copy.
 
             **Environment:** MLX bundle, \(r.fileCount) weight file(s), classified as \
@@ -120,11 +120,22 @@ public enum ModelLint {
             // report to be dismissed.
             let weightish: Set<ModelBundleAudit.Finding.Kind> =
                 [.staleDuplicateShard, .indexReferencesMissingFiles, .noIndex, .unindexedUniqueData]
-            let repro = r.findings.contains { weightish.contains($0.kind) }
-                ? "read each `*.safetensors` header (the 8-byte length prefix plus that many bytes "
-                  + "of JSON; no tensor data needed) and compare the tensor names against "
-                  + "`model.safetensors.index.json`'s `weight_map`"
-                : "check the repo for the file named above; it is absent from the listing"
+            let kinds = Set(r.findings.map(\.kind))
+            let repro: String
+            if kinds.contains(.misalignedTensors) {
+                // Deliberately arithmetic rather than "load it and watch the memory": a maintainer can
+                // confirm this from the published files alone, without the RAM to load the model.
+                repro = "read each `*.safetensors` header (the 8-byte little-endian length prefix plus "
+                    + "that many bytes of JSON) and, for every tensor, check whether "
+                    + "`(8 + header_length + data_offsets[0]) % dtype_size` is zero — it is the same "
+                    + "test `mlx/io/safetensors.cpp` applies when deciding whether it can mmap"
+            } else if kinds.contains(where: { weightish.contains($0) }) {
+                repro = "read each `*.safetensors` header (the 8-byte length prefix plus that many bytes "
+                    + "of JSON; no tensor data needed) and compare the tensor names against "
+                    + "`model.safetensors.index.json`'s `weight_map`"
+            } else {
+                repro = "check the repo for the file named above; it is absent from the listing"
+            }
             out.append("\n**How to reproduce** — \(repro).")
         }
         return out.joined(separator: "\n")
@@ -138,6 +149,7 @@ public enum ModelLint {
         case .unindexedUniqueData: return "A required weight file is absent from the index"
         case .missingSamplingDefaults: return "No sampling defaults in `generation_config.json`"
         case .missingChatTemplate: return "No chat template shipped"
+        case .misalignedTensors: return "Tensors are not aligned for their dtype, forcing copies at load"
         case .healthy: return "No issue"
         }
     }
@@ -187,6 +199,24 @@ public enum ModelLint {
         case .noIndex:
             return "The repo has \(r.fileCount) weight files and no index, so a loader has "
                 + "nothing to enumerate them with.\n\n\(list)\(more)"
+        case .misalignedTensors:
+            return """
+            \(f.detail).
+
+            MLX takes the zero-copy mmap path only when a tensor's ABSOLUTE byte offset is a \
+            multiple of its dtype size (`mlx/io/safetensors.cpp`); every other tensor is copied \
+            into a freshly allocated aligned buffer at load. The model's OUTPUT is unaffected — \
+            the same bytes are copied, and greedy decoding is bit-identical before and after — so \
+            no measured accuracy is in question. What it costs is memory, and past the point where \
+            a bundle no longer fits, the machine swaps and throughput collapses.
+
+            Two causes, both in how the file was written: an unpadded header, so the data block \
+            begins at an odd absolute byte and nothing after it can be 2- or 4-byte aligned; and \
+            tensors packed back-to-back at arbitrary relative offsets. `model-doctor --apply` \
+            repairs both in place, rewriting each shard with a padded header and 8-byte tensor \
+            offsets — enough for every dtype, at a cost of at most 7 bytes per tensor.
+            """
+
         case .unindexedUniqueData, .healthy:
             return f.detail
         }

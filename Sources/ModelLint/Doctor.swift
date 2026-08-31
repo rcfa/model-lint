@@ -2,9 +2,12 @@ import Foundation
 
 /// The repairs that are provably safe to make locally.
 ///
-/// Two, and only two: delete a shard layout that is byte-for-byte duplicated elsewhere, and rebuild
-/// an index from the files actually present. Both are DERIVABLE from the bundle — there is exactly
-/// one correct answer and it is computable from what is on disk.
+/// Three, and only three: delete a shard layout that is byte-for-byte duplicated elsewhere, rebuild
+/// an index from the files actually present, and rewrite shards whose tensors are misaligned for
+/// their dtype. All three are DERIVABLE from the bundle — there is exactly one correct answer and it
+/// is computable from what is on disk. The alignment repair is the strongest case of the three: it
+/// moves bytes without changing any, and every tensor is compared against the original before the
+/// rewrite is allowed to replace anything.
 ///
 /// It will not import sampling defaults or chat templates. Not because importing is wrong — a value
 /// published by the model's author beats a generic fallback — but because the source is OUTSIDE the
@@ -15,6 +18,7 @@ public enum ModelDoctor {
     public struct Outcome: Sendable {
         public var deleted = 0
         public var rebuilt = 0
+        public var realigned = 0
         public var reclaimable: Int64 = 0
         public var log: [String] = []
     }
@@ -46,6 +50,13 @@ public enum ModelDoctor {
                         out.rebuilt += 1
                         out.log.append(note)
                     }
+                case .misalignedTensors:
+                    out.log.append("  alignment: \(f.detail)")
+                    if apply {
+                        let (n, notes) = realign(in: r.dir)
+                        out.realigned += n
+                        out.log.append(contentsOf: notes)
+                    }
                 default: break
                 }
             }
@@ -53,7 +64,8 @@ public enum ModelDoctor {
         let human = ByteCountFormatter.string(fromByteCount: out.reclaimable, countStyle: .file)
         out.log.append("")
         out.log.append("\(apply ? "applied" : "would apply") — stale \(human), "
-                       + (apply ? "deleted \(out.deleted) file(s), rebuilt \(out.rebuilt) index(es)"
+                       + (apply ? "deleted \(out.deleted) file(s), rebuilt \(out.rebuilt) index(es), "
+                                   + "realigned \(out.realigned) shard(s)"
                                 : "re-run with --apply"))
         return out
     }
@@ -117,5 +129,31 @@ public enum ModelDoctor {
                                                      options: [.prettyPrinted, .sortedKeys]),
               (try? data.write(to: url, options: .atomic)) != nil else { return nil }
         return "    rebuilt index: \(wm.count) tensors across \(files.count) files"
+    }
+
+    /// Rewrite every misaligned shard in a bundle, one at a time.
+    ///
+    /// Sequential on purpose. Each rewrite needs one shard's worth of free space and reads the whole
+    /// shard twice; doing several at once multiplies the disk high-water mark for no gain, since the
+    /// work is I/O-bound either way. A refusal stops the bundle rather than continuing: if one shard
+    /// cannot be proven identical, the reason probably applies to its neighbours too.
+    static func realign(in dir: URL) -> (Int, [String]) {
+        let shards = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+            .filter { $0.hasSuffix(".safetensors") }.sorted()
+        var n = 0, notes: [String] = []
+        for name in shards {
+            switch TensorAlignment.rewrite(shard: dir.appendingPathComponent(name)) {
+            case .alreadyAligned:
+                continue
+            case .rewrote(let tensors):
+                n += 1
+                notes.append("    realigned \(name) (\(tensors) tensors)")
+            case .refused(let why):
+                notes.append("    REFUSED \(name) — \(why); the original is untouched")
+                notes.append("    stopping this bundle")
+                return (n, notes)
+            }
+        }
+        return (n, notes)
     }
 }

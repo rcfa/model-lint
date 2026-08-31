@@ -114,11 +114,18 @@ public enum ModelBundleAudit {
             /// mis-packaged. Never auto-filled: a guessed template produces plausible output that is
             /// subtly off-protocol, which is worse than a loud failure.
             case missingChatTemplate
+            /// Tensors are not naturally aligned for their dtype, so MLX's mmap loader copies them
+            /// into aligned buffers at load. The model's OUTPUT is unaffected — the same bytes are
+            /// copied — but the memory is real, and past the point where a bundle no longer fits it
+            /// is the difference between usable and swapping. Mechanically repairable from the file
+            /// itself, unlike a missing template, so `doctor` can fix it.
+            case misalignedTensors
         }
 
         public var severity: Severity {
             switch kind {
-            case .staleDuplicateShard, .indexReferencesMissingFiles, .noIndex: return .fixable
+            case .staleDuplicateShard, .indexReferencesMissingFiles, .noIndex,
+                 .misalignedTensors: return .fixable
             case .unindexedUniqueData: return .keep
             // Report-only: repairable in principle, but only from a SOURCE, so never by `doctor`.
             case .missingSamplingDefaults, .missingChatTemplate: return .keep

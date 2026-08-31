@@ -136,6 +136,18 @@ public enum BundleReader {
                                  + "while generation fails, so it looks selectively broken"))
             }
         }
+
+        // Alignment is a property of the FILES, not of the index, so it is surveyed here rather
+        // than in `ModelBundleAudit.audit`, which only sees the index/file relationship.
+        let alignment = TensorAlignment.survey(directory: r.dir)
+        if !alignment.isClean {
+            let gb = Double(alignment.copiedBytes) / 1_073_741_824
+            out.append(ModelBundleAudit.Finding(
+                kind: .misalignedTensors, files: [],
+                detail: String(
+                    format: "%d of %d tensors are not aligned for their dtype; MLX copies %.1f GB "
+                        + "into aligned buffers at load", alignment.misaligned, alignment.tensors, gb)))
+        }
         return out
     }
 
