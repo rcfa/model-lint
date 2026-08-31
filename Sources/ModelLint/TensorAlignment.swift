@@ -152,11 +152,18 @@ extension TensorAlignment {
 
         // One shard's worth of free space, not a whole second copy of the bundle. Checked up front so
         // a full disk is a refusal rather than a truncated file.
+        //
+        // Deliberately NOT `volumeAvailableCapacityForImportantUsage`: that figure counts purgeable
+        // caches as available, and a writer moving gigabytes a second outruns the purge — which
+        // showed up as ENOSPC with a quarter of a terabyte nominally free. `volumeAvailableCapacity`
+        // is what is actually there. The margin is a multiple of the shard rather than a constant,
+        // because a run rewrites many shards back to back and the reclaim lags behind.
         let need = Int64(8 + blob.count + cursor)
         if let free = try? url.deletingLastPathComponent().resourceValues(
-            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
-        ).volumeAvailableCapacityForImportantUsage, free < need + (1 << 30) {
-            return .refused("not enough free space (needs \(need >> 20) MB)")
+            forKeys: [.volumeAvailableCapacityKey]
+        ).volumeAvailableCapacity, Int64(free) < need * 2 + (4 << 30) {
+            return .refused("not enough free space (needs \(need >> 20) MB plus headroom, "
+                            + "\(Int64(free) >> 20) MB actually free)")
         }
 
         guard FileManager.default.createFile(atPath: tmp.path, contents: nil),
@@ -170,13 +177,22 @@ extension TensorAlignment {
             return .refused(reason)
         }
 
+        // `FileHandle.write(_:)` is the legacy ObjC API: on failure it raises an NSException, which
+        // Swift cannot catch, so a full disk aborts the PROCESS and takes the whole run with it. The
+        // throwing variant turns the same condition into a refusal that leaves the original intact.
         var length = UInt64(blob.count).littleEndian
-        dst.write(Data(bytes: &length, count: 8))
-        dst.write(blob)
+        do {
+            try dst.write(contentsOf: Data(bytes: &length, count: 8))
+            try dst.write(contentsOf: blob)
+        } catch { return fail("writing the header: \(error.localizedDescription)") }
         let newStart = 8 + blob.count
         for step in plan {
-            let gap = (newStart + step.at) - Int((try? dst.offset()) ?? 0)
-            if gap > 0 { dst.write(Data(count: gap)) }
+            guard let here = try? dst.offset() else { return fail("could not read the write offset") }
+            let gap = (newStart + step.at) - Int(here)
+            guard gap >= 0 else { return fail("\(step.name): layout went backwards") }
+            if gap > 0, (try? dst.write(contentsOf: Data(count: gap))) == nil {
+                return fail("\(step.name): could not write padding")
+            }
             try? src.seek(toOffset: UInt64(start + step.from))
             var remaining = step.to - step.from
             while remaining > 0 {
@@ -185,13 +201,13 @@ extension TensorAlignment {
                 // the enclosing pool drains — which is a SIGKILL, not a slowdown. Found only at real
                 // scale: a 253 MB shard is 32 chunks and never shows it.
                 let ok = autoreleasepool { () -> Bool in
-                    guard let block = try? src.read(upToCount: min(chunk, remaining)), !block.isEmpty
+                    guard let block = try? src.read(upToCount: min(chunk, remaining)), !block.isEmpty,
+                        (try? dst.write(contentsOf: block)) != nil
                     else { return false }
-                    dst.write(block)
                     remaining -= block.count
                     return true
                 }
-                guard ok else { return fail("short read in \(step.name)") }
+                guard ok else { return fail("\(step.name): short read, or the disk is full") }
             }
         }
         try? dst.close()
