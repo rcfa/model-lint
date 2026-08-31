@@ -49,6 +49,13 @@ struct ModelLintCLI: AsyncParsableCommand {
     @Option(name: .long, help: "Output: text | hf (a report ready to file against the model repo).")
     var format: String = "text"
 
+    @Flag(name: .long, help: """
+        Rewrite every shard into canonical form (sorted header keys, 8-byte tensor offsets) even \
+        where it is already aligned, so two machines holding the same weights hold the same BYTES. \
+        Use when copies must stay identical and re-copying them is impractical.
+        """)
+    var normalize = false
+
     @Flag(name: .long, help: "Repair the locally-derivable defects instead of only reporting.")
     var doctor = false
 
@@ -100,7 +107,17 @@ struct ModelLintCLI: AsyncParsableCommand {
         for r in roots { reports += ModelLint.scan(root: r, filter: filter) }
 
         if doctor {
-            let outcome = ModelDoctor.repair(reports, apply: apply)
+            var outcome: ModelDoctor.Outcome
+            if normalize {
+                outcome = ModelDoctor.Outcome()
+                for r in roots {
+                    let o = ModelDoctor.canonicalize(root: r, filter: filter, apply: apply)
+                    outcome.realigned += o.realigned
+                    outcome.log += o.log
+                }
+            } else {
+                outcome = ModelDoctor.repair(reports, apply: apply)
+            }
             print(outcome.log.joined(separator: "\n"))
         } else {
             print(format == "hf" ? ModelLint.huggingFace(reports) : ModelLint.text(reports))

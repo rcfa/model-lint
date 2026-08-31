@@ -16,6 +16,7 @@ import Foundation
 public enum ModelDoctor {
 
     public struct Outcome: Sendable {
+        public init() {}
         public var deleted = 0
         public var rebuilt = 0
         public var realigned = 0
@@ -137,7 +138,7 @@ public enum ModelDoctor {
     /// shard twice; doing several at once multiplies the disk high-water mark for no gain, since the
     /// work is I/O-bound either way. A refusal stops the bundle rather than continuing: if one shard
     /// cannot be proven identical, the reason probably applies to its neighbours too.
-    static func realign(in dir: URL) -> (Int, [String]) {
+    static func realign(in dir: URL, force: Bool = false) -> (Int, [String]) {
         let shards = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
             .filter { $0.hasSuffix(".safetensors") }.sorted()
         var n = 0, notes: [String] = []
@@ -149,7 +150,7 @@ public enum ModelDoctor {
             notes.append("    removed orphaned candidate \(orphan)")
         }
         for name in shards {
-            switch TensorAlignment.rewrite(shard: dir.appendingPathComponent(name)) {
+            switch TensorAlignment.rewrite(shard: dir.appendingPathComponent(name), force: force) {
             case .alreadyAligned:
                 continue
             case .rewrote(let tensors):
@@ -162,5 +163,43 @@ public enum ModelDoctor {
             }
         }
         return (n, notes)
+    }
+
+    /// Rewrite every shard into canonical form, whether or not it is currently misaligned.
+    ///
+    /// Repair asks "is this file wrong?". This asks "is this file the SAME as the one another
+    /// machine would produce?" — a different question with a different answer, because two correct
+    /// rewrites can still differ. The Python reference implementation this was ported from emits
+    /// header keys in insertion order; this one sorts them. Same tensors, same layout, same bytes of
+    /// data, different bytes of file.
+    ///
+    /// That distinction only matters when two copies must stay byte- and metadata-identical and the
+    /// link between them is too slow to re-copy the larger one; canonicalising in place turns a
+    /// terabyte of transfer into a local pass and a checksum comparison.
+    ///
+    /// Takes a root rather than `[Report]` on purpose: `scan` yields only bundles with FINDINGS, and
+    /// the bundles this exists to serve are the ones already repaired — healthy, reported by nothing.
+    /// Handing it reports made it a silent no-op.
+    public static func canonicalize(root: String, filter: String? = nil, apply: Bool = false)
+        -> Outcome
+    {
+        var out = Outcome()
+        for dir in BundleReader.discover(root: root, filter: filter) {
+            let shards = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+                .filter { $0.hasSuffix(".safetensors") }
+            guard !shards.isEmpty else { continue }
+            out.log.append("")
+            out.log.append(dir.lastPathComponent)
+            guard apply else {
+                out.log.append("  would canonicalize \(shards.count) shard(s)")
+                continue
+            }
+            let (n, notes) = realign(in: dir, force: true)
+            out.realigned += n
+            out.log.append(contentsOf: notes)
+        }
+        out.log.append("")
+        out.log.append(apply ? "canonicalized \(out.realigned) shard(s)" : "re-run with --apply")
+        return out
     }
 }

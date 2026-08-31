@@ -102,7 +102,13 @@ extension TensorAlignment {
     /// The tensor BYTES are never touched — only their positions — which is why this cannot change
     /// what the model computes. The proof is not a claim: before replacing anything, every tensor in
     /// the candidate is compared byte for byte against the original.
-    public static func rewrite(shard url: URL) -> Rewrite {
+    /// - Parameter force: rewrite even when every tensor is already aligned, to put the file in
+    ///   CANONICAL form — sorted header keys, tensors laid out in original data order on 8-byte
+    ///   boundaries. Two files with the same tensors then have the same bytes, whoever wrote them.
+    ///   That is what makes a rewrite reproducible on a second machine instead of merely correct,
+    ///   which matters when the two copies must stay byte-identical and the link between them is
+    ///   too slow to just re-copy.
+    public static func rewrite(shard url: URL, force: Bool = false) -> Rewrite {
         guard let (original, start) = Self.header(of: url) else { return .refused("unreadable header") }
 
         var names: [String] = [], meta: [String: (dtype: String, shape: [Int], begin: Int, end: Int)] = [:]
@@ -116,8 +122,11 @@ extension TensorAlignment {
             meta[key] = (dtype, shape, offsets[0], offsets[1])
         }
         guard !names.isEmpty else { return .refused("no tensors") }
-        guard names.contains(where: { (start + meta[$0]!.begin) % (dtypeSize[meta[$0]!.dtype] ?? 1) != 0 })
-        else { return .alreadyAligned }
+        if !force,
+            !names.contains(where: { (start + meta[$0]!.begin) % (dtypeSize[meta[$0]!.dtype] ?? 1) != 0 })
+        {
+            return .alreadyAligned
+        }
 
         // Lay out in the ORIGINAL data order so the copy is a forward scan of the source rather than
         // a seek storm — on a 20 GB shard that is the difference between minutes and much longer.
