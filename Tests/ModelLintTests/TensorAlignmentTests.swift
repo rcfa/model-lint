@@ -247,3 +247,39 @@ struct LintReportReproTests {
         #expect(!out.contains("dtype_size"))
     }
 }
+
+/// Candidates left behind by an interrupted rewrite.
+///
+/// A killed or crashed run leaves its temporary file holding a whole shard's worth of disk. Two
+/// tools write these — this one uses `.aligned-tmp`, the Python reference it was ported from uses
+/// `.aligned.tmp` — and sweeping only our own spelling left nine of the other kind on disk, one of
+/// them 4.4 GB, which a later sync dutifully copied to a second machine.
+@Suite("interrupted rewrites leave no litter")
+struct OrphanCandidateTests {
+
+    private func scratch() throws -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: "model-lint-orphan-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    @Test("both spellings are swept, and real shards are not")
+    func sweepsBothSpellings() throws {
+        let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ours = dir.appending(path: "model-00001-of-00002.safetensors.aligned-tmp")
+        let theirs = dir.appending(path: "model-00002-of-00002.safetensors.aligned.tmp")
+        let keep = dir.appending(path: "model-00001-of-00002.safetensors")
+        for u in [ours, theirs, keep] { try Data("x".utf8).write(to: u) }
+
+        let (_, notes) = ModelDoctor.realign(in: dir)
+
+        let fm = FileManager.default
+        #expect(!fm.fileExists(atPath: ours.path), "our own candidate must be swept")
+        #expect(!fm.fileExists(atPath: theirs.path),
+                "the Python aligner's candidate must be swept too — it is the one that actually accumulated")
+        #expect(fm.fileExists(atPath: keep.path), "a real shard must never be swept")
+        #expect(notes.filter { $0.contains("orphaned candidate") }.count == 2)
+    }
+}

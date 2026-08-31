@@ -144,8 +144,13 @@ public enum ModelDoctor {
         var n = 0, notes: [String] = []
         // A rewrite interrupted by a crash or a kill leaves its candidate behind, holding a shard's
         // worth of disk. `rewrite` clears the one it is about to use, but only for shards it reaches.
+        //
+        // BOTH spellings. This tool writes `.aligned-tmp`; the Python reference implementation it was
+        // ported from writes `.aligned.tmp`. Sweeping only our own left nine of the other kind on
+        // disk — one of them 4.4 GB — and a later sync happily copied an 817 MB orphan to the second
+        // machine. A cleanup that only recognises its own litter is half a cleanup.
         for orphan in ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
-            .filter({ $0.hasSuffix(".aligned-tmp") }) {
+            .filter({ $0.hasSuffix(".aligned-tmp") || $0.hasSuffix(".aligned.tmp") }) {
             try? FileManager.default.removeItem(at: dir.appendingPathComponent(orphan))
             notes.append("    removed orphaned candidate \(orphan)")
         }
