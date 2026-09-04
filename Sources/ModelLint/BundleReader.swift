@@ -145,8 +145,10 @@ public enum BundleReader {
             out.append(ModelBundleAudit.Finding(
                 kind: .misalignedTensors, files: [],
                 detail: String(
-                    format: "%d of %d tensors are not aligned for their dtype; MLX copies %.1f GB "
-                        + "into aligned buffers at load", alignment.misaligned, alignment.tensors, gb)))
+                    format: "%d of %d tensors are not aligned for their dtype (%d gap%@ break "
+                        + "safetensors contiguity); MLX copies %.1f GB "
+                        + "into aligned buffers at load", alignment.misaligned, alignment.tensors, alignment.gaps,
+                        alignment.gaps == 1 ? "" : "s", gb)))
         }
         return out
     }

@@ -112,6 +112,61 @@ struct TensorAlignmentTests {
         #expect(try BundleReader.tensorNames(url) == ["a", "odd", "b"])
     }
 
+    /// safetensors requires the data region to be TILED: the Rust loader walks tensors in offset
+    /// order and rejects the file at the first hole with "invalid offset for tensor X". The repair
+    /// used to pad each tensor up to an 8-byte boundary, which aligned it and simultaneously made the
+    /// file invalid for every loader except MLX — a bundle repaired here was refused outright by
+    /// vMLX on 2026-09-04. These two assert the invariants together, because satisfying one while
+    /// breaking the other is exactly the failure that shipped.
+    @Test("the repair leaves NO gaps — tensors tile the data region")
+    func repairIsContiguous() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appending(path: "gapfree-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appending(path: "model-00001-of-00001.safetensors")
+        // An F32 [3] is 12 bytes: 12 % 8 = 4, so a pad-to-8 layout puts a 4-byte hole after it.
+        // Mixed dtypes are what make the ordering matter at all.
+        try write([
+            (name: "a.f32_odd", dtype: "F32", shape: [3], bytes: Array(repeating: 1, count: 12)),
+            (name: "b.bf16", dtype: "BF16", shape: [5], bytes: Array(repeating: 2, count: 10)),
+            (name: "c.i64", dtype: "I64", shape: [2], bytes: Array(repeating: 3, count: 16)),
+            (name: "d.u8", dtype: "U8", shape: [7], bytes: Array(repeating: 4, count: 7)),
+        ], padHeader: false, to: url)
+
+        _ = TensorAlignment.rewrite(shard: url)
+
+        let survey = TensorAlignment.survey(directory: dir)
+        #expect(survey.gaps == 0, "the repair left \(survey.gaps) hole(s); safetensors rejects any")
+        #expect(survey.misaligned == 0, "the repair left \(survey.misaligned) misaligned tensor(s)")
+    }
+
+    /// The survey must SEE a gap, or a bundle this tool damaged reports as clean — which is what
+    /// happened to eleven local bundles: aligned, holed, and passed as fine for four days.
+    @Test("a gapped shard is reported, not passed as clean")
+    func surveyDetectsGaps() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appending(path: "gapped-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appending(path: "model-00001-of-00001.safetensors")
+        // Hand-built with a hole: two tensors, the second starting 4 bytes late.
+        var header: [String: Any] = [:]
+        header["a"] = ["dtype": "F32", "shape": [3], "data_offsets": [0, 12]]
+        header["b"] = ["dtype": "F32", "shape": [4], "data_offsets": [16, 32]]
+        var blob = try JSONSerialization.data(withJSONObject: header, options: [.sortedKeys])
+        while (8 + blob.count) % 8 != 0 { blob.append(0x20) }
+        var out = Data()
+        withUnsafeBytes(of: UInt64(blob.count).littleEndian) { out.append(contentsOf: $0) }
+        out.append(blob)
+        out.append(Data(repeating: 0, count: 32))
+        try out.write(to: url)
+
+        let survey = TensorAlignment.survey(directory: dir)
+        #expect(survey.gaps == 1, "expected the 4-byte hole to be counted, got \(survey.gaps)")
+        #expect(!survey.isClean, "a gapped bundle must not report clean")
+    }
+
     @Test("a shard that is already aligned is left alone, so the repair is idempotent")
     func alreadyAlignedIsUntouched() throws {
         let dir = try scratch()

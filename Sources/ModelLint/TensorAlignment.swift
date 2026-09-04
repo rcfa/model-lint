@@ -40,7 +40,16 @@ public enum TensorAlignment {
         /// Bytes the loader would have to copy — the number that matters, not the tensor count:
         /// one misaligned 5 GB tensor costs more than a thousand misaligned scalars.
         public let copiedBytes: Int
-        public var isClean: Bool { misaligned == 0 }
+        /// Tensors that do not begin exactly where the previous one ended.
+        ///
+        /// Checked SEPARATELY from alignment because the two can disagree, and the case where they
+        /// disagree is the one this tool created: padding a tensor up to an 8-byte boundary aligns it
+        /// and simultaneously makes the file invalid. A survey that asked only about alignment
+        /// reported such bundles as clean — which is exactly what happened to the eleven this tool
+        /// damaged on 2026-08-31.
+        public let gaps: Int
+
+        public var isClean: Bool { misaligned == 0 && gaps == 0 }
     }
 
     /// Read one shard's header. Returns the parsed map and the absolute offset of the data block.
@@ -61,9 +70,12 @@ public enum TensorAlignment {
     public static func survey(directory: URL) -> Survey {
         let files = (try? FileManager.default.contentsOfDirectory(atPath: directory.path))?
             .filter { $0.hasSuffix(".safetensors") }.sorted() ?? []
-        var tensors = 0, misaligned = 0, copied = 0
+        var tensors = 0, misaligned = 0, copied = 0, gaps = 0
         for name in files {
             guard let (map, dataStart) = header(of: directory.appending(path: name)) else { continue }
+            // Collected per FILE and walked in offset order, because contiguity is a property of the
+            // whole data region and cannot be judged one tensor at a time.
+            var spans: [(begin: Int, end: Int)] = []
             for (key, value) in map where key != "__metadata__" {
                 guard let meta = value as? [String: Any],
                     let dtype = meta["dtype"] as? String,
@@ -75,9 +87,16 @@ public enum TensorAlignment {
                     misaligned += 1
                     copied += offsets[1] - offsets[0]
                 }
+                spans.append((offsets[0], offsets[1]))
+            }
+            spans.sort { $0.begin < $1.begin }
+            var previousEnd: Int? = nil
+            for span in spans {
+                if let previousEnd, span.begin != previousEnd { gaps += 1 }
+                previousEnd = span.end
             }
         }
-        return Survey(tensors: tensors, misaligned: misaligned, copiedBytes: copied)
+        return Survey(tensors: tensors, misaligned: misaligned, copiedBytes: copied, gaps: gaps)
     }
 }
 
@@ -128,9 +147,25 @@ extension TensorAlignment {
             return .alreadyAligned
         }
 
-        // Lay out in the ORIGINAL data order so the copy is a forward scan of the source rather than
-        // a seek storm — on a 20 GB shard that is the difference between minutes and much longer.
-        names.sort { meta[$0]!.begin < meta[$1]!.begin }
+        // ORDER BY DESCENDING DTYPE SIZE, then pack with NO padding.
+        //
+        // This is what makes alignment and CONTIGUITY compatible rather than opposed. safetensors
+        // requires the data region to be tiled by the tensors: the Rust loader walks them in offset
+        // order and rejects the file at the first hole with "invalid offset for tensor X". Padding
+        // each tensor up to an 8-byte boundary — which is what this did — put a hole after every
+        // tensor whose length is not a multiple of 8, and MLX's tolerance for that is what kept it
+        // invisible until vMLX refused a repaired bundle outright (2026-09-04).
+        //
+        // A tensor's byte length is always a multiple of its own dtype size, so laying down every
+        // 8-byte dtype first, then 4, then 2, then 1, lands each tensor on an offset that is already
+        // a multiple of its dtype size. The alignment falls out of the ORDER and costs no padding.
+        // The forward-scan argument the old order was chosen for is worth little next to emitting a
+        // file that other loaders reject.
+        names.sort {
+            let a = meta[$0]!, b = meta[$1]!
+            let sa = Self.dtypeSize[a.dtype] ?? 1, sb = Self.dtypeSize[b.dtype] ?? 1
+            return sa != sb ? sa > sb : a.begin < b.begin
+        }
 
         var newHeader: [String: Any] = [:]
         if let m = original["__metadata__"] { newHeader["__metadata__"] = m }
@@ -138,7 +173,6 @@ extension TensorAlignment {
         var cursor = 0
         for name in names {
             let m = meta[name]!
-            if cursor % target != 0 { cursor += target - (cursor % target) }
             newHeader[name] = ["dtype": m.dtype, "shape": m.shape,
                                "data_offsets": [cursor, cursor + (m.end - m.begin)]]
             plan.append((name, m.begin, m.end, cursor))
